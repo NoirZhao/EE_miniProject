@@ -1,0 +1,183 @@
+---
+title: "Durham Assignment - Predict Daily Temperature"
+author: "Maonan Zhao"
+output:
+  html_document:
+    toc: yes
+    df_print: paged
+  html_notebook:
+    toc: yes
+  pdf_document:
+    toc: yes
+---
+
+## 1. Loading in required packages and Data preparation
+
+### 1.1 Loading data and the library
+
+Before the analysis begins, I load in the packages required for the subsequent analysis.
+
+```{r}
+library("dplyr")
+library("tseries")
+library("urca")
+library("lmtest")
+library("fBasics")
+library("forecast")
+```
+
+In this section, I aim to load in the file that is given. A full inspection on the file gives 3 time series data with respect to time spanning across 1st Jan 1901 to 31st Dec 2019.
+
+```{r}
+input_path = "C:/DU/E&E/Mini-Project/"
+file_name = "durhamtemp_1901_2019.csv"
+dt <- read.csv(paste(input_path,file_name, sep=""), sep=",", check.names = T)
+dt
+head(dt)
+tail(dt)
+```
+
+```{r}
+dt$Year<-as.factor(dt$Year)
+dt$Month<-as.factor(dt$Month)
+
+#summarise the data to monthly average
+dt_monthly <-dt%>%
+  group_by(Year,Month)%>%
+  summarise(totalrain= sum(PPT.),
+            meanavtemp=mean(Av.temp),
+            meanTmax=mean(Tmax),
+            meanTmin=mean(Tmin))
+dt_monthly$Date <- paste("15/",dt_monthly$Month,"/",dt_monthly$Year)
+dt_monthly
+head(dt_monthly)
+tail(dt_monthly)
+```
+
+Note that the "Date" column is does not imply the true value for that particular date.
+
+## 2. Analysis on the Time Series
+
+In this section, there are 4 subsections. Subsection 1 is to show the monthly mean average temperature plot,and find the fit line . Subsection 2
+
+### 2.1 Plot on the Series (Visualisation)
+
+This is a time series plot of monthly average temperature in Durham from 1901 to 2019. It seems that there is a trend in the series (This may be due to global warming). Hence, this series may be a trend stationary series. We can de-trend it by fitting in a linear regression model and subtract the slope. This leads to subsection 2.2.
+
+```{r}
+meantemp <- ts(dt_monthly$meanavtemp, start = 1901, end= 2019, frequency = 12)
+plot(meantemp, type ="l", main = "The Plot of Mean Average Temperature", ylab="temperature")
+abline(reg=lm(data =dt_monthly, meanavtemp~ c(1:nrow(dt_monthly))),col='red',lwd=2)
+
+```
+
+### 2.2 De-trending the Time Series
+
+```{r}
+model_linear<-lm(data =dt_monthly, meanavtemp~ c(1:nrow(dt_monthly)))
+ 
+summary(model_linear)
+trending <- c(1:length(meantemp))*model_linear[[1]][2] 
+
+demean_meantemp <- meantemp - trending
+plot(demean_meantemp, type ="l", main = "The Plot of De-meaned Mean Average Temperature", ylab="temperature")
+```
+
+The linear fitting results show both time trend and the intercept are statistical significant at p values lesser than 0.001.We de-trend the series according to the coefficient and the given time.
+
+### 2.3 Unit-Root Testing on Non-Stationarity
+
+In this subsection, I deployed Augmented Dickey Fuller Test to test its unit-root non-stationarity. The null hypothesis is that the series exhibits a unit-root.
+
+```{r}
+adf.test(meantemp)
+```
+
+The p-value is 0.01, which I can safely reject the null hypothesis (that this process is a unit-root process).
+
+### 2.4 Time Series Diagnostics and Statistical Properties
+
+```{r}
+normalTest(meantemp,method = "jb") # Cannot reject the normality of R
+D=hist(meantemp, probability = TRUE)
+qqnorm(meantemp); qqline(meantemp)
+```
+
+I deployed Jarque-Bera asymptotic test on the time series to show that the series is not normally distributed. This is rather clear in the histogram plot. In addition, the Quantile-Quartile plot also suggests its non-normality.
+
+## 3. Model it with ARIMA model
+
+Why I choose this model: ARIMA (Autoregressive Integrated Moving Average) is a popular time series forecasting model that is widely used for forecasting temperature data. Monthly temperature data often exhibits seasonal patterns, where the temperature varies based on the month of the year.Temperature data often shows autocorrelation.The month temperature is correlated with the that in the previous month,and the same month of last year.So the temperature data is seasonality and autocorrelation,which is suitable for ARIMA model to solve this kind of problem.Also I searched on the internet, there are a lot of examples for using ARIMA to forecast temperature.
+
+```{r}
+# Investigate the statistical dependency of the simple return series.
+ 
+Box.test(meantemp, lag= log(length(meantemp)), type='Ljung')
+```
+
+The null hypothesis of Box-Ljung test is that there is no autocorrelation. Our results of the test (p value is lesser 2.2e-16) suggests rejecting null hypothesis. This time series has autocorrelation, and therefore, I can model it using linear models such as ARIMA models.
+
+### 3.1 Model Choosing Using ACF, PACF
+
+```{r}
+acf(meantemp)
+pacf(meantemp)
+```
+
+The combination of PACF and ACF suggests the series exhibit seasonality. A seasonal ARIMA model should be fitted to the series.
+
+### 3.2 Seasonal ARIMA Modelling
+
+```{r}
+model1 <- arima(meantemp,order=c(1,0,0),seasonal=list(order=c(1,0,1),period=12)) # by intuition of weather
+model1
+
+model2 <- auto.arima(meantemp)
+model2
+
+model3 <- arima(meantemp,order=c(0,0,0),seasonal=list(order=c(1,0,0),period=12))
+model3
+```
+
+I compare 3 models in ARIMAs. I first begin with the intuition that monthly average temperature is yearly dependent. Hence, it will be conducive to try a seasonal model that gives a 12-month lag. Then, I use Auto ARIMA from the R package to pick a model. I then rely AIC figure to decide which model to go with. The winning model is model 1 because of the smallest value of AIC.
+
+### 3.3 Validation of the Model
+
+It is crucial to check that the residual series should exhibit no linear dependencies.
+
+```{r}
+pacf(model1$residuals)
+acf(model1$residuals)
+Box.test(model1$residuals, lag= 10, type='Ljung')
+
+```
+
+## 4 Forecast
+
+### 4.1 Out-of-Sample Forecast
+
+```{r}
+pred <- predict(arima(meantemp,order=c(1,0,0),seasonal=list(order=c(1,0,1),period=12))  ,n.ahead=12)
+as.numeric(pred$pred)
+plot(c(meantemp[1317:1417],pred$pred), type="l", lwd=2,col="red", main = 'Predicted Monthly Average Temperature of 2020', xlab="100-historical data from Dec 2019", ylab="Average temp")
+lines( meantemp[1317:1417], lwd=2)
+legend(1, 18, legend=c("Historical Average Temp", "Prediction"),
+       col=c("black", "red"), lty=c(1,1), lwd=2 ,cex=0.8)
+```
+
+### 4.2 Backtesting
+
+```{r}
+pred_train <- predict(arima(meantemp[1:as.numeric(length(meantemp)-12)],order=c(1,0,0),seasonal=list(order=c(1,0,1),period=12))  ,n.ahead=12)
+# construct the plot 
+plot(c(meantemp[1360:1405],pred_train$pred), type="l", lwd=2,col="red", ylim=c(2,18) ,  main= "Backtesting 12 Months Data", ylab="Average Temperature", xlab="Backtesting Time Horizon")
+lines(meantemp[1360:1405],lwd=2)
+lines(c(meantemp[1360:1405],meantemp[1406:1417]), lwd=1,col="blue")
+ 
+lines(c( meantemp[1360:1405], as.numeric(pred_train$pred+1.96*pred_train$se)),col='green', lwd=1, type = "l")
+lines(c( meantemp[1360:1405], as.numeric(pred_train$pred-1.96*pred_train$se)),col='orange', lwd=1, type = "l")
+legend(1, 18, legend=c("Historical Average Temp", "Prediction", "Confidence Interval 95", "Confidence Interval 5" ),
+       col=c("blue", "red", "green","orange"), lty=c(1,1), lwd=2 ,cex=0.8)
+```
+
+It is important to note that the AIC does not tell us whether a model is perfect or not, but only provides a guideline for selecting the best model. So I do a backtest to check the result of the prediction. We can see that the prediction line is in the range of confidence interval and it is also similar to the historical value.
